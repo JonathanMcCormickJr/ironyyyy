@@ -6,3 +6,11 @@ edition = "2024"
 [dependencies]
 aes-gcm = "0.10"
 argon2 = "0.5"
+anyhow = "1.0"
+base64 = "0.21"
+rand = { version = "0.8", features = ["std"] }
+rand_core = "0.6"
+rpassword = "7.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4", "serde"] }
