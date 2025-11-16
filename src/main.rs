@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![warn(clippy::all, clippy::pedantic)]
+
 use anyhow::{Context, Result, anyhow};
 use ironyyyy::security;
 use rpassword::prompt_password;
@@ -159,7 +162,11 @@ fn run_project_repl(
     );
     loop {
         let input = prompt_line("> ")?;
-        match input.trim().to_lowercase().as_str() {
+        let normalized = input.trim().to_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        match normalized.as_str() {
             "help" => print_help(),
             "list epics" => list_epics(&payload.data),
             "list stories" => {
@@ -168,19 +175,19 @@ fn run_project_repl(
                 }
             }
             "add epic" => match add_epic(&mut payload.data) {
-                Ok(_) => {
+                Ok(()) => {
                     persist_payload(path, &user.metadata, payload, key)?;
                 }
                 Err(err) => println!("Failed to add epic: {err}"),
             },
             "add story" => match add_story(&mut payload.data) {
-                Ok(_) => {
+                Ok(()) => {
                     persist_payload(path, &user.metadata, payload, key)?;
                 }
                 Err(err) => println!("Failed to add story: {err}"),
             },
             "update story status" => match update_story_status(&mut payload.data) {
-                Ok(_) => {
+                Ok(()) => {
                     persist_payload(path, &user.metadata, payload, key)?;
                 }
                 Err(err) => println!("Failed to move story: {err}"),
@@ -194,7 +201,6 @@ fn run_project_repl(
                 persist_payload(path, &user.metadata, payload, key)?;
                 break;
             }
-            command if command.is_empty() => continue,
             _ => println!("Unknown command. Type 'help' for guidance."),
         }
     }
@@ -286,7 +292,7 @@ fn add_story(data: &mut ProjectData) -> Result<()> {
         title,
         description,
         status,
-        estimate: (!estimate.is_empty()).then(|| estimate),
+        estimate: (!estimate.is_empty()).then_some(estimate),
     };
     epic.stories.push(story);
     println!("Story added to epic '{}'.", epic.title);
@@ -298,12 +304,12 @@ fn update_story_status(data: &mut ProjectData) -> Result<()> {
     let story_id = prompt_uuid("Story ID: ")?;
     let new_status = prompt_status(Status::Backlog)?;
 
-    if let Some(epic) = data.epics.iter_mut().find(|epic| epic.id == epic_id) {
-        if let Some(story) = epic.stories.iter_mut().find(|story| story.id == story_id) {
-            story.status = new_status;
-            println!("Story '{}' moved to {}.", story.title, story.status);
-            return Ok(());
-        }
+    if let Some(epic) = data.epics.iter_mut().find(|epic| epic.id == epic_id)
+        && let Some(story) = epic.stories.iter_mut().find(|story| story.id == story_id)
+    {
+        story.status = new_status;
+        println!("Story '{}' moved to {}.", story.title, story.status);
+        return Ok(());
     }
     Err(anyhow!("story or epic not found"))
 }
@@ -315,7 +321,7 @@ fn status_summary(data: &ProjectData) {
             .iter()
             .filter(|epic| epic.status == *status)
             .count();
-        println!("{} epics in {}", epic_count, status);
+        println!("{epic_count} epics in {status}");
     }
 }
 
@@ -416,7 +422,7 @@ fn prompt_status(default: Status) -> Result<Status> {
             "Available statuses: {}",
             Status::variants()
                 .iter()
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         );

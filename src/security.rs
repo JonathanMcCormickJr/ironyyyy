@@ -30,12 +30,12 @@ const ARGON2_TIME_COST: u32 = 1; // smaller for faster tests
 const ARGON2_TIME_COST: u32 = 8; // larger for enhanced security
 
 fn argon2_params() -> Result<Params, argon2::Error> {
-    Ok(Params::new(
+    Params::new(
         ARGON2_MEMORY_COST, // memory cost in KiB
         ARGON2_TIME_COST,   // time cost
         1,                  // parallelism
         None,               // output length (default is 32 bytes)
-    )?)
+    )
 }
 
 fn argon2_instance() -> Result<Argon2<'static>, argon2::Error> {
