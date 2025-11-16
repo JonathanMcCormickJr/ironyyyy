@@ -4,7 +4,8 @@ use anyhow::{Result, anyhow};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rand_core::{OsRng, RngCore};
+use rand::rngs::OsRng;
+use rand_core::TryRngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -88,7 +89,9 @@ fn build_cipher(key: &[u8; AES_KEY_LEN]) -> Aes256Gcm {
 pub fn encrypt_payload(payload: &[u8], key: &[u8; AES_KEY_LEN]) -> Result<EncryptedBlob> {
     let cipher = build_cipher(key);
     let mut nonce_bytes = [0u8; AES_NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut nonce_bytes)
+        .map_err(|e| anyhow!("nonce generation failed: {e}"))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, payload)
