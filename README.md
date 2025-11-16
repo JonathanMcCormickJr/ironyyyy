@@ -1,4 +1,4 @@
-# Project Manager CLI
+# ironyyyy: Project Manager CLI
 
 A security-conscious Rust CLI for basic Jira-style epic and story management. Each account keeps its data encrypted via AES-256-GCM with a key derived from the user password using Argon2id, and the CLI unlocks only after the password hash stored inside the encrypted payload has been validated.
 
