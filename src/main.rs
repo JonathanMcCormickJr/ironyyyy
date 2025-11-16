@@ -536,3 +536,51 @@ struct AvailableUser {
     metadata: Metadata,
     path: PathBuf,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn format_iso_date_zero_is_epoch() {
+        assert_eq!(format_iso_date(0), "1970-01-01");
+    }
+
+    #[test]
+    fn collect_user_databases_reads_written_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path();
+        let uuid = Uuid::new_v4();
+        let metadata = Metadata {
+            uuid,
+            username: "tester".into(),
+            created_at: 0,
+        };
+
+        let password = "test-pass";
+        let salt = security::salt_from_uuid(&uuid)?;
+        let hash = security::hash_password(password, &salt)?;
+        let key = security::derive_key(password, uuid.as_bytes())?;
+        let payload = EncryptedPayload {
+            password_hash: hash,
+            data: ProjectData::default(),
+        };
+        let encrypted = security::encrypt_payload(&serde_json::to_vec(&payload)?, &key)?;
+        let disk = OnDiskDatabase {
+            metadata: metadata.clone(),
+            encrypted,
+        };
+        let file_path = base.join(format!("{uuid}.json"));
+        fs::write(&file_path, serde_json::to_string_pretty(&disk)?)?;
+
+        let users = collect_user_databases(base)?;
+        assert_eq!(users.len(), 1);
+        let stored = &users[0];
+        assert_eq!(stored.metadata.username, metadata.username);
+        assert_eq!(stored.path, file_path);
+        Ok(())
+    }
+}
