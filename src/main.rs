@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
+use easy_totp::EasyTotp;
 use ironyyyy::security;
 use rpassword::prompt_password;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,10 @@ fn main() -> Result<()> {
                 let mut payload: EncryptedPayload = serde_json::from_slice(&plain)?;
                 security::verify_password(&password, &payload.password_hash)?;
 
+                if let Some(totp) = payload.totp.as_ref() {
+                    require_totp_for_login(totp)?;
+                }
+
                 return run_project_repl(user, &mut payload, &key, &user.path);
             }
             LoginSelection::Register => {
@@ -74,6 +79,7 @@ fn ensure_sample_account(base_dir: &Path) -> Result<()> {
     let payload = EncryptedPayload {
         password_hash: hash,
         data: sample_project_data(),
+        totp: None,
     };
     let encrypted = security::encrypt_payload(&serde_json::to_vec(&payload)?, &key)?;
     let disk = OnDiskDatabase {
@@ -209,6 +215,21 @@ fn run_project_repl(
                 Err(err) => println!("Failed to move story: {err}"),
             },
             "status summary" => status_summary(&payload.data),
+            "2fa status" => print_two_factor_status(payload),
+            "enable 2fa" => {
+                if payload.totp.is_some() {
+                    println!("Two-factor authentication is already enabled.");
+                } else if let Err(err) = enable_two_factor(payload, &user.metadata, key, path) {
+                    println!("Failed to enable 2FA: {err}");
+                }
+            }
+            "disable 2fa" => {
+                if payload.totp.is_none() {
+                    println!("Two-factor authentication is not enabled.");
+                } else if let Err(err) = disable_two_factor(payload, key, &user.metadata, path) {
+                    println!("Failed to disable 2FA: {err}");
+                }
+            }
             "save" => {
                 persist_payload(path, &user.metadata, payload, key)?;
                 println!("Saved.");
@@ -232,6 +253,9 @@ fn print_help() {
     println!("  add story          - add a story to an epic");
     println!("  update story status- change a story's workflow state");
     println!("  status summary     - show counts per status");
+    println!("  2fa status         - show whether two-factor authentication is enabled");
+    println!("  enable 2fa         - display a QR code and enable TOTP");
+    println!("  disable 2fa        - disable TOTP after verifying the current code");
     println!("  save               - persist changes now");
     println!("  exit/quit          - save and leave");
 }
@@ -357,6 +381,79 @@ fn persist_payload(
     Ok(())
 }
 
+fn print_two_factor_status(payload: &EncryptedPayload) {
+    if payload.totp.is_some() {
+        println!("Two-factor authentication is enabled for this account.");
+    } else {
+        println!("Two-factor authentication is not enabled.");
+    }
+}
+
+fn enable_two_factor(
+    payload: &mut EncryptedPayload,
+    metadata: &Metadata,
+    key: &[u8; 32],
+    path: &Path,
+) -> Result<()> {
+    let (totp, qr_lines) = security::generate_totp_instance(&metadata.username)?;
+    println!("Please scan the following QR code with your authenticator app:");
+    for line in qr_lines {
+        println!("{line}");
+    }
+    verify_totp_interactive(
+        &totp,
+        "Enter the code from your authenticator app to finalize enabling two-factor authentication:",
+    )?;
+    payload.totp = Some(totp);
+    persist_payload(path, metadata, payload, key)?;
+    println!("Two-factor authentication enabled.");
+    Ok(())
+}
+
+fn disable_two_factor(
+    payload: &mut EncryptedPayload,
+    key: &[u8; 32],
+    metadata: &Metadata,
+    path: &Path,
+) -> Result<()> {
+    let totp = payload
+        .totp
+        .as_ref()
+        .ok_or_else(|| anyhow!("two-factor authentication is not enabled"))?;
+    verify_totp_interactive(
+        totp,
+        "Enter your current TOTP code to disable two-factor authentication:",
+    )?;
+    payload.totp = None;
+    persist_payload(path, metadata, payload, key)?;
+    println!("Two-factor authentication disabled.");
+    Ok(())
+}
+
+fn require_totp_for_login(totp: &EasyTotp) -> Result<()> {
+    verify_totp_interactive(
+        totp,
+        "Two-factor authentication is enabled for this account. Enter your current TOTP code to continue:",
+    )
+}
+
+fn verify_totp_interactive(totp: &EasyTotp, prompt: &str) -> Result<()> {
+    const MAX_ATTEMPTS: usize = 3;
+    println!("{prompt}");
+    for attempt in 1..=MAX_ATTEMPTS {
+        let code = prompt_line("TOTP code: ")?;
+        if security::validate_totp_code(totp, &code)? {
+            println!("TOTP code accepted.");
+            return Ok(());
+        }
+        let remaining = MAX_ATTEMPTS - attempt;
+        if remaining > 0 {
+            println!("Invalid code. {remaining} attempt(s) remaining.");
+        }
+    }
+    Err(anyhow!("failed to verify TOTP code after several attempts"))
+}
+
 fn prompt_uuid(prompt: &str) -> Result<Uuid> {
     let input = prompt_line(prompt)?;
     let uuid = Uuid::from_str(input.trim()).context("invalid UUID")?;
@@ -425,6 +522,7 @@ fn register_new_user(base_dir: &Path, existing: &[AvailableUser]) -> Result<()> 
     let payload = EncryptedPayload {
         password_hash: hash,
         data: ProjectData::default(),
+        totp: None,
     };
     let encrypted = security::encrypt_payload(&serde_json::to_vec(&payload)?, &key)?;
     let disk = OnDiskDatabase {
@@ -454,6 +552,7 @@ struct Metadata {
 struct EncryptedPayload {
     password_hash: String,
     data: ProjectData,
+    totp: Option<EasyTotp>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -567,6 +666,7 @@ mod tests {
         let payload = EncryptedPayload {
             password_hash: hash,
             data: ProjectData::default(),
+            totp: None,
         };
         let encrypted = security::encrypt_payload(&serde_json::to_vec(&payload)?, &key)?;
         let disk = OnDiskDatabase {

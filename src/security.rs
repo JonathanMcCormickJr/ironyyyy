@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use easy_totp::{EasyTotp, QRColorMode, TerminalQRSize};
 use rand::rngs::OsRng;
 use rand_core::TryRngCore;
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,22 @@ pub fn decrypt_payload(blob: &EncryptedBlob, key: &[u8; AES_KEY_LEN]) -> Result<
         .map_err(|e| anyhow!("decryption failed: {e}"))
 }
 
+/// Generates a new TOTP instance and returns both the secret data and a text-based QR code which can be displayed directly in the terminal for the user to scan with an authenticator app.
+pub fn generate_totp_instance(username: &str) -> Result<(EasyTotp, Vec<String>)> {
+    let totp = EasyTotp::new(Some("Ironyyyy".to_string()), username.to_string())?;
+    let qr_code = totp
+        .qr_text(TerminalQRSize::Full, QRColorMode::Inverted)
+        .map_err(|e| anyhow!("{}", e))?;
+    Ok((totp, qr_code))
+}
+
+/// Validates a TOTP code against the provided TOTP instance.
+pub fn validate_totp_code(totp: &EasyTotp, code: &str) -> Result<bool> {
+    totp.generate_token()
+        .map_err(|e| anyhow!("TOTP token generation failed: {e}"))
+        .map(|token| token == code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +151,15 @@ mod tests {
         let blob = encrypt_payload(payload, &key).expect("encryption");
         let decrypted = decrypt_payload(&blob, &key).expect("decryption");
         assert_eq!(payload, decrypted.as_slice());
+    }
+
+    #[test]
+    fn generate_and_validate_totp() -> Result<()> {
+        let (totp, _) = generate_totp_instance("tester")?;
+        let code = totp
+            .generate_token()
+            .map_err(|e| anyhow!("token generation: {e}"))?;
+        assert!(validate_totp_code(&totp, &code)?);
+        Ok(())
     }
 }

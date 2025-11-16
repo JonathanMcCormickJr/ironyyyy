@@ -20,6 +20,9 @@ A security-conscious Rust CLI for basic Jira-style epic and story management. Ea
    - `add story` – appends a story to an epic with optional estimate metadata.
    - `update story status` – move a story through Backlog, In Progress, or Done.
    - `status summary` – prints how many epics sit in each status bucket.
+  - `2fa status` – report whether two-factor authentication is enabled for this account.
+  - `enable 2fa` – display a terminal QR (via `easy_totp::EasyTotp::qr_text`) and require a code to keep the secret.
+  - `disable 2fa` – remove the stored TOTP secret after verifying a current authenticator code.
    - `save` – immediately writes the encrypted data back to the user file.
    - `exit`/`quit` – saves and leaves the CLI.
 
@@ -52,6 +55,7 @@ To add another user manually, copy the demo JSON file, update `metadata.username
 - Argon2id runs with a high memory/time combination (65 536 KiB, 8 passes) outside of tests to deter password cracking.
 - AES-GCM uses a random 12-byte nonce for each update, stored in base64 alongside the ciphertext.
 - The password hash lives inside the encrypted payload; the CLI does not reveal any user data until the hash is re-derived and verified.
+ - If 2FA is enabled, the CLI stores the `EasyTotp` config inside the encrypted payload and will prompt for a TOTP code immediately after password verification. Use `2fa status`, `enable 2fa`, and `disable 2fa` to manage it.
 
 ## Validation steps
 
