@@ -2,9 +2,11 @@
 #![warn(clippy::all, clippy::pedantic)]
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{TimeZone, Utc};
 use ironyyyy::security;
 use rpassword::prompt_password;
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -12,28 +14,40 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+enum LoginSelection {
+    Existing(usize),
+    Register,
+}
+
 fn main() -> Result<()> {
     let base_dir = PathBuf::from("databases");
     fs::create_dir_all(&base_dir).context("failed to create databases directory")?;
     ensure_sample_account(&base_dir)?;
 
-    let available = collect_user_databases(&base_dir)?;
-    if available.is_empty() {
-        return Err(anyhow!("no user databases could be loaded"));
+    loop {
+        let available = collect_user_databases(&base_dir)?;
+        if available.is_empty() {
+            return Err(anyhow!("no user databases could be loaded"));
+        }
+
+        match prompt_user_selection(&available)? {
+            LoginSelection::Existing(index) => {
+                let user = &available[index];
+                let password = prompt_password("Password: ").context("failed to read password")?;
+                let key = security::derive_key(&password, user.metadata.uuid.as_bytes())?;
+
+                let db = read_database(&user.path)?;
+                let plain = security::decrypt_payload(&db.encrypted, &key)?;
+                let mut payload: EncryptedPayload = serde_json::from_slice(&plain)?;
+                security::verify_password(&password, &payload.password_hash)?;
+
+                return run_project_repl(user, &mut payload, &key, &user.path);
+            }
+            LoginSelection::Register => {
+                register_new_user(&base_dir, &available)?;
+            }
+        }
     }
-
-    let index = prompt_user_selection(&available)?;
-    let user = &available[index];
-
-    let password = prompt_password("Password: ").context("failed to read password")?;
-    let key = security::derive_key(&password, user.metadata.uuid.as_bytes())?;
-
-    let db = read_database(&user.path)?;
-    let plain = security::decrypt_payload(&db.encrypted, &key)?;
-    let mut payload: EncryptedPayload = serde_json::from_slice(&plain)?;
-    security::verify_password(&password, &payload.password_hash)?;
-
-    run_project_repl(user, &mut payload, &key, &user.path)
 }
 
 fn ensure_sample_account(base_dir: &Path) -> Result<()> {
@@ -111,26 +125,28 @@ fn collect_user_databases(base: &Path) -> Result<Vec<AvailableUser>> {
     Ok(users)
 }
 
-fn prompt_user_selection(users: &[AvailableUser]) -> Result<usize> {
+fn prompt_user_selection(users: &[AvailableUser]) -> Result<LoginSelection> {
     println!("Available accounts:");
+    println!("  0. Create a new account");
     for (idx, user) in users.iter().enumerate() {
         println!(
-            "{}. {} (uuid: {}, created: {})",
+            "  {}. {} (uuid: {}, created: {})",
             idx + 1,
             user.metadata.username,
             user.metadata.uuid,
-            user.metadata.created_at,
+            format_iso_date(user.metadata.created_at),
         );
     }
 
     loop {
-        let input = prompt_line("Enter account number: ")?;
+        let input = prompt_line("Enter selection: ")?;
         if let Ok(choice) = input.trim().parse::<usize>() {
-            if choice == 0 || choice > users.len() {
-                println!("Please select a number between 1 and {}", users.len());
-                continue;
+            if choice == 0 {
+                return Ok(LoginSelection::Register);
             }
-            return Ok(choice - 1);
+            if choice <= users.len() {
+                return Ok(LoginSelection::Existing(choice - 1));
+            }
         }
         println!("Invalid input, try again.");
     }
@@ -345,6 +361,80 @@ fn prompt_uuid(prompt: &str) -> Result<Uuid> {
     let input = prompt_line(prompt)?;
     let uuid = Uuid::from_str(input.trim()).context("invalid UUID")?;
     Ok(uuid)
+}
+
+fn format_iso_date(secs: u64) -> String {
+    let Ok(secs) = i64::try_from(secs) else {
+        return "unknown".into();
+    };
+    Utc.timestamp_opt(secs, 0)
+        .single()
+        .map_or_else(|| "unknown".into(), |dt| dt.format("%Y-%m-%d").to_string())
+}
+
+fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn register_new_user(base_dir: &Path, existing: &[AvailableUser]) -> Result<()> {
+    println!("Registering a new account.");
+    let username = loop {
+        let name = prompt_line("Username: ")?;
+        if name.trim().is_empty() {
+            println!("Username cannot be empty.");
+            continue;
+        }
+        if existing
+            .iter()
+            .any(|user| user.metadata.username.eq_ignore_ascii_case(&name))
+        {
+            println!("An account with that username already exists.");
+            continue;
+        }
+        break name;
+    };
+
+    let password = loop {
+        let first = prompt_password("Password: ")?;
+        let second = prompt_password("Confirm password: ")?;
+        if first.is_empty() {
+            println!("Password cannot be empty.");
+            continue;
+        }
+        if first != second {
+            println!("Passwords do not match.");
+            continue;
+        }
+        break first;
+    };
+
+    let uuid = Uuid::new_v4();
+    let metadata = Metadata {
+        uuid,
+        username: username.clone(),
+        created_at: epoch_seconds(),
+    };
+
+    let salt = security::salt_from_uuid(&uuid).map_err(|e| anyhow!("salt creation: {e}"))?;
+    let hash = security::hash_password(&password, &salt)?;
+    let key = security::derive_key(&password, uuid.as_bytes())?;
+
+    let payload = EncryptedPayload {
+        password_hash: hash,
+        data: ProjectData::default(),
+    };
+    let encrypted = security::encrypt_payload(&serde_json::to_vec(&payload)?, &key)?;
+    let disk = OnDiskDatabase {
+        metadata: metadata.clone(),
+        encrypted,
+    };
+    let path = base_dir.join(format!("{uuid}.json"));
+    fs::write(&path, serde_json::to_string_pretty(&disk)?)?;
+    println!("Account '{username}' created.");
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
